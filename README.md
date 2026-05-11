@@ -21,7 +21,7 @@ The system processes brain MRI scans through three phases:
 ├── pipeline/graph.py          # LangGraph DAG for Phase 1
 ├── agents/orchestrator.py     # LangGraph DAG for Phase 2 & 3
 ├── preprocessing/mri_prep.py  # N4 bias correction, skull stripping, normalization
-├── segmentation/dynunet_infer.py  # MONAI DynUNet inference + GT fallback
+├── segmentation/segresnet_infer.py  # MONAI SegResNet inference + GT fallback
 ├── radiomics/feature_extractor.py  # PyRadiomics + manual fallback
 ├── clinical_features/
 │   ├── location_mapper.py     # Atlas-based brain region mapping

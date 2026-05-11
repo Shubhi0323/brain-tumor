@@ -1,2 +1,7 @@
 outputs
 data
+UCSF-PDGM-v5
+__pycache__/
+*.pyc
+pipeline.log
+verify_production.py

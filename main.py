@@ -6,12 +6,17 @@ Phase 2: Embeddings → similarity → WHO/RANO analysis → AI reasoning → re
 Phase 3: Memory → HITL validation → CAP report → visualization → evaluation
 
 Dataset formats:
-    nifti: Standard NIfTI format (patient folders)
-    dicom: DICOM series format (patient folders with modality series)
+    nifti:     Standard NIfTI format (patient folders)
+    dicom:     DICOM series format (patient folders with modality series)
+    ucsf_pdgm: UCSF-PDGM glioma dataset (NIfTI with _nifti suffixes)
 """
 import os
 import json
 import argparse
+
+from utils.pipeline_logger import get_logger
+
+logger = get_logger("Pipeline")
 
 
 def _load_phase1_state(patient_id, base_dir, output_dir):
@@ -46,12 +51,29 @@ def _load_phase1_state(patient_id, base_dir, output_dir):
     }
 
 
+def _run_preflight(state):
+    """Run preflight checks and log results."""
+    try:
+        from utils.preflight import run_preflight_checks
+        passed, issues = run_preflight_checks(state)
+        if not passed:
+            logger.warning(f"Preflight issues for {state['patient_id']}:")
+            for issue in issues:
+                logger.warning(f"  - {issue}")
+        else:
+            logger.info(f"Preflight checks passed for {state['patient_id']}")
+        return passed, issues
+    except Exception as e:
+        logger.warning(f"Preflight check failed: {e}")
+        return True, []  # Don't block on preflight failure
+
+
 def _phase1(patient_id, base_dir, output_dir):
     """Run Phase 1 for a single patient."""
     from pipeline.graph import build_pipeline
-    print(f"\n{'='*65}")
-    print(f"[Phase 1] {patient_id}")
-    print(f"{'='*65}")
+    logger.info(f"\n{'='*65}")
+    logger.info(f"[Phase 1] {patient_id}")
+    logger.info(f"{'='*65}")
     state = {
         "patient_id": patient_id, "base_dir": base_dir,
         "output_dir": output_dir,
@@ -59,6 +81,10 @@ def _phase1(patient_id, base_dir, output_dir):
         "radiomics_features": {}, "tumor_location": [],
         "clinical_profile": {}, "errors": [],
     }
+
+    # Preflight
+    _run_preflight(state)
+
     app = build_pipeline()
     return app.invoke(state)
 
@@ -66,7 +92,7 @@ def _phase1(patient_id, base_dir, output_dir):
 def _phase2(state, skip_hitl=False):
     """Run Phase 2 for a single patient."""
     from agents.orchestrator import build_phase2_pipeline
-    print(f"\n[Phase 2] {state['patient_id']}")
+    logger.info(f"\n[Phase 2] {state['patient_id']}")
     state = {
         **state,
         "embedding": None, "embedding_path": None,
@@ -83,7 +109,7 @@ def _phase2(state, skip_hitl=False):
 def _phase3(state, skip_hitl=False):
     """Run Phase 3 for a single patient."""
     from agents.orchestrator import build_phase3_pipeline
-    print(f"\n[Phase 3] {state['patient_id']}")
+    logger.info(f"\n[Phase 3] {state['patient_id']}")
     if "skip_hitl" not in state:
         state["skip_hitl"] = skip_hitl
     # Ensure Phase 3 keys exist
@@ -103,7 +129,7 @@ def _phase3(state, skip_hitl=False):
 def _phase23(state, skip_hitl=False):
     """Run Phase 2 + 3 combined."""
     from agents.orchestrator import build_full_pipeline
-    print(f"\n[Phase 2+3] {state['patient_id']}")
+    logger.info(f"\n[Phase 2+3] {state['patient_id']}")
     state = {
         **state,
         "embedding": None, "embedding_path": None,
@@ -126,7 +152,6 @@ def process_patient(patient_id, base_dir, output_dir, phase, skip_hitl):
         return _phase2(state, skip_hitl)
     elif phase == "3":
         state = _load_phase1_state(patient_id, base_dir, output_dir)
-        # Try to load Phase 2 report
         report_path = os.path.join(output_dir, "reports",
                                    f"{patient_id}_report.json")
         if os.path.exists(report_path):
@@ -147,7 +172,7 @@ def process_patient(patient_id, base_dir, output_dir, phase, skip_hitl):
         state = _phase1(patient_id, base_dir, output_dir)
         return _phase23(state, skip_hitl)
     else:
-        print(f"[ERROR] Unknown phase: {phase}")
+        logger.error(f"Unknown phase: {phase}")
         return {}
 
 
@@ -165,21 +190,19 @@ def process_nifti(data_dir, output_dir, phase, skip_hitl, patient_id=None):
 def process_dicom(data_dir, output_dir, phase, skip_hitl, max_patients=None,
                   patient_id=None):
     from utils.dicom_adapter import (
-        discover_dicom_series,
-        convert_dicom_patient,
-        save_dicom_as_nifti,
-        normalize_dicom_patient_id,
+        discover_dicom_series, convert_dicom_patient,
+        save_dicom_as_nifti, normalize_dicom_patient_id,
     )
 
     discovered = discover_dicom_series(data_dir)
     if not discovered:
-        print(f"[ERROR] No DICOM patients found in {data_dir}")
+        logger.error(f"No DICOM patients found in {data_dir}")
         return
 
     if patient_id:
         target_id = normalize_dicom_patient_id(patient_id)
         if target_id not in discovered:
-            print(f"[ERROR] Patient {patient_id} not found in DICOM dataset")
+            logger.error(f"Patient {patient_id} not found in DICOM dataset")
             return
         patient_ids = [target_id]
     else:
@@ -193,7 +216,50 @@ def process_dicom(data_dir, output_dir, phase, skip_hitl, max_patients=None,
             patient_dir, _ = save_dicom_as_nifti(images, pid, output_dir)
             process_patient(pid, patient_dir, output_dir, phase, skip_hitl)
         except Exception as e:
-            print(f"[ERROR] {pid}: {e}")
+            logger.error(f"{pid}: {e}")
+
+
+def process_ucsf_pdgm(data_dir, output_dir, phase, skip_hitl,
+                       max_patients=None, patient_id=None):
+    """Process UCSF-PDGM dataset format."""
+    from utils.ucsf_pdgm_adapter import (
+        discover_ucsf_patients, validate_patient_modalities,
+        convert_ucsf_patient,
+    )
+
+    discovered = discover_ucsf_patients(data_dir)
+    if not discovered:
+        logger.error(f"No UCSF-PDGM patients found in {data_dir}")
+        return
+
+    if patient_id:
+        if patient_id not in discovered:
+            logger.error(f"Patient {patient_id} not found in UCSF-PDGM dataset")
+            return
+        patient_ids = [patient_id]
+    else:
+        patient_ids = sorted(discovered.keys())
+        if max_patients:
+            patient_ids = patient_ids[:max_patients]
+
+    logger.info(f"Processing {len(patient_ids)} UCSF-PDGM patient(s)")
+
+    for pid in patient_ids:
+        try:
+            # Validate modality alignment
+            patient_dir_orig = os.path.dirname(
+                next(iter(discovered[pid].values()))
+            )
+            validation = validate_patient_modalities(patient_dir_orig)
+            if not validation.valid:
+                for issue in validation.issues:
+                    logger.warning(f"{pid}: {issue}")
+
+            # Convert to standard naming
+            patient_dir = convert_ucsf_patient(discovered[pid], pid, output_dir)
+            process_patient(pid, patient_dir, output_dir, phase, skip_hitl)
+        except Exception as e:
+            logger.error(f"{pid}: {e}")
 
 
 if __name__ == "__main__":
@@ -206,7 +272,8 @@ if __name__ == "__main__":
                         help="Output directory")
     parser.add_argument("--patient_id", default=None,
                         help="Single patient ID (folder name for NIfTI/DICOM)")
-    parser.add_argument("--format", choices=["nifti", "dicom"], default="dicom",
+    parser.add_argument("--format", choices=["nifti", "dicom", "ucsf_pdgm"],
+                        default="dicom",
                         help="Dataset format")
     parser.add_argument("--phase",
                         choices=["1", "2", "3", "23", "all"],
@@ -214,10 +281,11 @@ if __name__ == "__main__":
                         help="Pipeline phase: 1=imaging, 2=agents, 3=clinical, "
                              "23=agents+clinical, all=end-to-end")
     parser.add_argument("--max_patients", type=int, default=None,
-                        help="Max patients (DICOM mode)")
+                        help="Max patients (DICOM/UCSF-PDGM mode)")
     parser.add_argument("--skip_hitl", action="store_true",
                         help="Auto-approve HITL validation (batch mode)")
-    parser.add_argument("--ollama_url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+    parser.add_argument("--ollama_url",
+                        default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
                         help="Ollama API URL for Llama 3")
     parser.add_argument("--evaluate", action="store_true",
                         help="Run evaluation framework after pipeline")
@@ -229,6 +297,9 @@ if __name__ == "__main__":
     if args.format == "dicom":
         process_dicom(args.data_dir, args.output_dir, args.phase,
                       args.skip_hitl, args.max_patients, args.patient_id)
+    elif args.format == "ucsf_pdgm":
+        process_ucsf_pdgm(args.data_dir, args.output_dir, args.phase,
+                           args.skip_hitl, args.max_patients, args.patient_id)
     else:
         process_nifti(args.data_dir, args.output_dir, args.phase,
                       args.skip_hitl, args.patient_id)

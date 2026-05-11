@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, START, END
 
 # Import node functions (we will define these next)
 from preprocessing.mri_prep import run_preprocessing
-from segmentation.dynunet_infer import run_segmentation
+from segmentation.segresnet_infer import run_segmentation
 from radiomics.feature_extractor import extract_radiomics
 from clinical_features.location_mapper import map_tumor_location
 from clinical_features.symptom_builder import build_clinical_profile

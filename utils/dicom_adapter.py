@@ -1,14 +1,12 @@
 """
 Dataset Adapter for DICOM Series
 =================================
-Converts DICOM patient studies into per-modality NIfTI files that match the
-existing pipeline contract:
+Converts DICOM patient studies into per-modality NIfTI files.
 
-  <patient_id>_t1.nii.gz
-  <patient_id>_t1ce.nii.gz
-  <patient_id>_t2.nii.gz
-  <patient_id>_flair.nii.gz
-  <patient_id>_seg.nii.gz (optional)
+Production features:
+  - Enhanced modality detection for GE, Siemens, Philips scanners
+  - DICOM series validation (slice consistency, orientation)
+  - Structured logging
 """
 import os
 from typing import Dict, List, Optional, Tuple
@@ -16,6 +14,10 @@ from typing import Dict, List, Optional, Tuple
 import pydicom
 from pydicom.misc import is_dicom
 import SimpleITK as sitk
+
+from utils.pipeline_logger import get_logger
+
+logger = get_logger("DICOM_Adapter")
 
 REQUIRED_MODALITIES = ("t1", "t1ce", "t2", "flair")
 OPTIONAL_MODALITIES = ("seg",)
@@ -94,7 +96,9 @@ def _modality_hint(series_dir: str, sample_file: str) -> str:
     # Contrast-enhanced T1 checks first so "t1ce" doesn't get classified as "t1".
     if any(token in text for token in (
         "t1ce", "t1c", "t1 gd", "t1-gd", "post contrast", "post-contrast",
-        "contrast enhanced", "contrast-enhanced", "gad", "mprage c", "mpragec"
+        "contrast enhanced", "contrast-enhanced", "gad", "mprage c", "mpragec",
+        "t1w+c", "t1_post", "ax t1 c+", "sag t1 c+", "cor t1 c+",
+        "bravo+c", "fspgr+c", "3d t1 gd", "t1 with gad",
     )):
         return "t1ce"
     if "flair" in text:
@@ -103,7 +107,7 @@ def _modality_hint(series_dir: str, sample_file: str) -> str:
         return "t2"
     if "seg" in text or "label" in text or "rtstruct" in text:
         return "seg"
-    if "t1" in text:
+    if "t1" in text or "mprage" in text or "bravo" in text or "fspgr" in text:
         return "t1"
     return "unknown"
 
@@ -171,7 +175,38 @@ def discover_dicom_series(data_dir: str) -> Dict[str, Dict[str, str]]:
         if modality_to_series:
             discovered[patient_id] = modality_to_series
 
+    logger.info(f"Discovered {len(discovered)} DICOM patient(s)")
     return discovered
+
+
+def validate_dicom_series(series_dir: str) -> List[str]:
+    """Validate a DICOM series for consistency issues."""
+    issues = []
+    dicom_files = _dicom_files_in_dir(series_dir)
+    if len(dicom_files) < 2:
+        return issues
+
+    # Check slice thickness consistency
+    thicknesses = set()
+    orientations = set()
+    for dcm_path in dicom_files[:20]:  # Sample first 20
+        try:
+            ds = pydicom.dcmread(dcm_path, stop_before_pixels=True, force=True)
+            st = getattr(ds, "SliceThickness", None)
+            if st is not None:
+                thicknesses.add(round(float(st), 2))
+            iop = getattr(ds, "ImageOrientationPatient", None)
+            if iop is not None:
+                orientations.add(tuple(round(float(x), 3) for x in iop))
+        except Exception:
+            pass
+
+    if len(thicknesses) > 1:
+        issues.append(f"Inconsistent slice thickness in {os.path.basename(series_dir)}: {thicknesses}")
+    if len(orientations) > 1:
+        issues.append(f"Inconsistent orientation in {os.path.basename(series_dir)}")
+
+    return issues
 
 
 def convert_dicom_patient(modality_series: Dict[str, str]) -> Dict[str, sitk.Image]:

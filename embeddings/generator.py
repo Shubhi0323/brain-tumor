@@ -4,13 +4,18 @@ Embedding Generation Node
 Converts clinical tumor profiles into dense vector embeddings
 using BioClinicalBERT (emilyalsentzer/Bio_ClinicalBERT).
 
-Each patient's clinical features (radiomics, morphology, location,
-symptoms) are serialized into a clinical text description, then
-encoded into a 768-dimensional embedding vector.
+Production features:
+  - L2 normalization before saving
+  - NaN/Inf/zero-norm validation
+  - Structured logging
 """
 import os
 import json
 import numpy as np
+
+from utils.pipeline_logger import get_logger
+
+logger = get_logger("Embedding")
 
 try:
     from transformers import AutoTokenizer, AutoModel
@@ -92,7 +97,6 @@ def clinical_profile_to_text(profile: dict) -> str:
     return " ".join(parts)
 
 
-@torch.no_grad()
 def generate_embedding(text: str) -> np.ndarray:
     """Generate a 768-dim embedding from clinical text using BioClinicalBERT."""
     tokenizer, model = _load_model()
@@ -108,11 +112,19 @@ def generate_embedding(text: str) -> np.ndarray:
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    outputs = model(**inputs)
+    with torch.no_grad():
+        outputs = model(**inputs)
 
     # Use [CLS] token embedding as the sentence representation
     cls_embedding = outputs.last_hidden_state[:, 0, :].squeeze(0)
-    return cls_embedding.cpu().numpy()
+    embedding = cls_embedding.cpu().numpy()
+
+    # L2 normalize
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
+
+    return embedding
 
 
 def generate_embedding_fallback(profile: dict) -> np.ndarray:
@@ -148,12 +160,38 @@ def generate_embedding_fallback(profile: dict) -> np.ndarray:
     vec = np.array(features, dtype=np.float32)
     embedding = np.zeros(768, dtype=np.float32)
     embedding[:len(vec)] = vec
+
+    # L2 normalize
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
+
     return embedding
+
+
+def _validate_embedding(embedding: np.ndarray, patient_id: str) -> list:
+    """Validate embedding for NaN, Inf, zero-norm, excessive sparsity."""
+    issues = []
+    if np.any(np.isnan(embedding)):
+        issues.append(f"Embedding contains NaN values for {patient_id}")
+        embedding = np.nan_to_num(embedding, nan=0.0)
+    if np.any(np.isinf(embedding)):
+        issues.append(f"Embedding contains Inf values for {patient_id}")
+        embedding = np.nan_to_num(embedding, posinf=0.0, neginf=0.0)
+    norm = np.linalg.norm(embedding)
+    if norm < 1e-8:
+        issues.append(f"Near-zero norm embedding for {patient_id}")
+    nonzero = np.count_nonzero(embedding)
+    sparsity = 1.0 - (nonzero / max(len(embedding), 1))
+    if sparsity > 0.99:
+        issues.append(f"Excessively sparse embedding for {patient_id}: {sparsity:.2%}")
+    return issues
 
 
 def run_embedding_generation(state: dict) -> dict:
     """
     LangGraph node: Generate embedding for a patient's clinical profile.
+    L2-normalizes and validates embeddings before saving.
     """
     patient_id = state["patient_id"]
     output_dir = state["output_dir"]
@@ -163,40 +201,43 @@ def run_embedding_generation(state: dict) -> dict:
     emb_dir = os.path.join(output_dir, "embeddings")
     os.makedirs(emb_dir, exist_ok=True)
 
-    print(f"[Embedding] Processing patient: {patient_id}")
+    logger.log_stage_start(patient_id)
 
     if not clinical_profile:
         msg = f"No clinical profile for {patient_id}, skipping embedding."
-        print(f"  [WARNING] {msg}")
+        logger.warning(msg, patient_id=patient_id)
         errors.append(msg)
         return {**state, "embedding": None, "errors": errors}
 
     try:
         if TRANSFORMERS_AVAILABLE:
-            print("  Using BioClinicalBERT for embedding generation.")
+            logger.info("Using BioClinicalBERT for embedding generation.", patient_id=patient_id)
             text = clinical_profile_to_text(clinical_profile)
-            print(f"  Clinical text ({len(text)} chars): {text[:120]}...")
+            logger.info(f"Clinical text ({len(text)} chars): {text[:120]}...", patient_id=patient_id)
             try:
                 embedding = generate_embedding(text)
             except Exception as model_err:
-                # Graceful fallback when hosted runtimes block torch.load-based
-                # model loading due security/version constraints.
-                print(f"  [WARNING] Transformer embedding unavailable: {model_err}")
-                print("  Falling back to deterministic clinical feature vector.")
+                logger.warning(f"Transformer embedding unavailable: {model_err}", patient_id=patient_id)
                 embedding = generate_embedding_fallback(clinical_profile)
                 errors.append(f"Embedding model fallback used for {patient_id}")
         else:
-            print("  Transformers not available. Using fallback feature vector.")
+            logger.info("Transformers not available. Using fallback feature vector.", patient_id=patient_id)
             embedding = generate_embedding_fallback(clinical_profile)
+
+        # Validate embedding
+        validation_issues = _validate_embedding(embedding, patient_id)
+        for issue in validation_issues:
+            logger.warning(issue, patient_id=patient_id)
+            errors.append(issue)
 
         save_path = os.path.join(emb_dir, f"{patient_id}_embedding.npy")
         np.save(save_path, embedding)
-        print(f"  Embedding shape: {embedding.shape} | Saved to: {save_path}")
+        logger.info(f"Embedding shape: {embedding.shape} | norm: {np.linalg.norm(embedding):.4f}", patient_id=patient_id)
 
         return {**state, "embedding": embedding.tolist(), "embedding_path": save_path, "errors": errors}
 
     except Exception as e:
         msg = f"Error generating embedding for {patient_id}: {e}"
-        print(f"  [ERROR] {msg}")
+        logger.error(msg, patient_id=patient_id)
         errors.append(msg)
         return {**state, "embedding": None, "errors": errors}

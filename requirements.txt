@@ -24,3 +24,5 @@ ollama
 # Phase 3 — Clinical Interface
 chromadb
 matplotlib
+streamlit
+pyyaml

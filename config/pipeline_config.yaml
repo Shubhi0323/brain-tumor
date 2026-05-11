@@ -1,0 +1,74 @@
+# ─── Pipeline Configuration ───────────────────────────────────────────
+# Central YAML config for all pipeline parameters.
+# Override any value via environment variables prefixed with PIPELINE_
+# e.g. PIPELINE_PREPROCESSING__TARGET_SPACING="1.0,1.0,1.0"
+
+preprocessing:
+  target_spacing: [1.0, 1.0, 1.0]
+  skull_strip_enabled: true
+  n4_max_iterations: [50, 50, 30, 20]
+  intensity_normalization: "zscore"       # "zscore" or "minmax"
+
+segmentation:
+  # Morphological cleanup
+  cleanup_enabled: true
+  cleanup_kernel_radius: 1               # ball structuring element radius
+  # Connected component filtering
+  cc_filter_enabled: true
+  cc_min_voxels: 500                     # discard components smaller than this
+  cc_keep_top_n: 3                       # keep only N largest components
+  # Quality thresholds
+  quality_min_tumor_voxels: 100
+  quality_max_tumor_fraction: 0.30       # flag if >30% of brain is "tumor"
+  quality_min_tumor_fraction: 0.0001     # flag if <0.01%
+
+progression:
+  progression_threshold_mm3_per_day: 50.0
+  regression_threshold_mm3_per_day: -50.0
+  baseline_default_interval_days: 90
+  # WHO-grade-specific doubling times (days) for rule-based fallback
+  doubling_times:
+    glioblastoma: 50
+    astrocytoma: 300
+    oligodendroglioma: 400
+    meningioma: 600
+    glioma_nos: 200
+
+who_classification:
+  # Differential diagnosis
+  differential_top_n: 5
+  # Low-confidence detection
+  low_confidence_gap_threshold: 1.0      # top1 - top2 score gap
+  # Sigmoid calibration parameters
+  calibration_method: "sigmoid"          # "linear" or "sigmoid"
+  sigmoid_k: 1.2                         # steepness
+  sigmoid_midpoint: 4.0                  # center point
+  # Molecular markers (default unknown)
+  default_molecular_markers:
+    IDH: "unknown"
+    MGMT: "unknown"
+    1p19q: "unknown"
+    ATRX: "unknown"
+    TP53: "unknown"
+
+similarity:
+  top_k: 5
+  min_similarity_threshold: 0.5
+  normalize_embeddings: true
+  embedding_dim: 768
+
+error_handling:
+  max_retries: 2
+  log_level: "INFO"                      # DEBUG, INFO, WARNING, ERROR
+  structured_log_file: "pipeline.log"
+  graceful_degradation: true
+
+ucsf_pdgm:
+  # Filename patterns for UCSF-PDGM dataset
+  modality_patterns:
+    t1: ["_T1_", "_t1_", "_T1."]
+    t1ce: ["_T1c_", "_t1c_", "_T1CE_", "_t1ce_", "_T1GD_", "_T1post_"]
+    t2: ["_T2_", "_t2_", "_T2."]
+    flair: ["_FLAIR_", "_flair_", "_Flair_"]
+  nifti_suffix: "_nifti"
+  expected_extensions: [".nii.gz", ".nii"]
