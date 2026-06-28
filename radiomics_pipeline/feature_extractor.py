@@ -3,6 +3,11 @@ Radiomics Feature Extraction Node
 ===================================
 Uses PyRadiomics to extract shape, texture (GLCM), and intensity features
 from the tumor segmentation mask overlaid on the original MRI.
+
+NOTE: This module lives in radiomics_pipeline/ (not radiomics/) to avoid
+shadowing the installed pyradiomics library, which also imports as
+`import radiomics`. With the folder renamed, pyradiomics loads cleanly
+with zero import hacks.
 """
 import os
 import json
@@ -10,38 +15,9 @@ import numpy as np
 import SimpleITK as sitk
 
 try:
-    # pyradiomics installs as 'radiomics' in site-packages, but this local radiomics/
-    # package shadows it. We load pyradiomics by manipulating sys.path temporarily.
-    import sys as _sys
-    import importlib as _importlib
-
-    # Save and remove paths that cause the local radiomics/ to shadow pyradiomics
-    _app_paths = [p for p in _sys.path if p in ("", "/app")]
-    for _p in _app_paths:
-        _sys.path.remove(_p)
-
-    # Save this module's entry before we clear the radiomics namespace
-    _this_module = _sys.modules.get(__name__)
-    _this_pkg = _sys.modules.get("radiomics")
-
-    # Clear only the top-level 'radiomics' so importlib finds pyradiomics
-    if "radiomics" in _sys.modules:
-        del _sys.modules["radiomics"]
-
-    try:
-        _pyradiomics = _importlib.import_module("radiomics")
-        featureextractor = _importlib.import_module("radiomics.featureextractor")
-        PYRADIOMICS_AVAILABLE = True
-    finally:
-        # Restore sys.path
-        for _p in _app_paths:
-            _sys.path.insert(0, _p)
-        # Restore our local module references
-        if _this_pkg is not None:
-            _sys.modules["radiomics"] = _this_pkg
-        if _this_module is not None:
-            _sys.modules[__name__] = _this_module
-except (ImportError, AttributeError, Exception):
+    from radiomics import featureextractor
+    PYRADIOMICS_AVAILABLE = True
+except (ImportError, Exception):
     PYRADIOMICS_AVAILABLE = False
 
 
@@ -123,8 +99,6 @@ def extract_features_manual(image_arr: np.ndarray, mask_arr: np.ndarray) -> dict
 
 def extract_features_pyradiomics(image_sitk: sitk.Image, mask_sitk: sitk.Image) -> dict:
     """Extract features using PyRadiomics library."""
-    params = get_radiomics_params()
-
     extractor = featureextractor.RadiomicsFeatureExtractor()
     extractor.enableFeatureClassByName("shape")
     extractor.enableFeatureClassByName("firstorder")
@@ -173,7 +147,6 @@ def extract_radiomics(state: dict) -> dict:
             data = np.load(preprocessed_path)
             t1ce_arr = data[1]  # T1CE channel
         else:
-            # Try to load from original files
             from preprocessing.mri_prep import find_modality_file
             t1ce_path = find_modality_file(base_dir, "t1ce")
             if t1ce_path:
@@ -186,7 +159,6 @@ def extract_radiomics(state: dict) -> dict:
 
         # Ensure shapes match
         if t1ce_arr.shape != mask_arr.shape:
-            # Resize mask to match image
             min_shape = tuple(min(s1, s2) for s1, s2 in zip(t1ce_arr.shape, mask_arr.shape))
             t1ce_arr = t1ce_arr[:min_shape[0], :min_shape[1], :min_shape[2]]
             mask_arr = mask_arr[:min_shape[0], :min_shape[1], :min_shape[2]]
@@ -201,7 +173,6 @@ def extract_radiomics(state: dict) -> dict:
             print("  PyRadiomics not available. Using manual feature extraction.")
             features = extract_features_manual(t1ce_arr, mask_arr)
 
-        # Save features
         save_path = os.path.join(rad_dir, f"{patient_id}_radiomics.json")
         with open(save_path, "w") as f:
             json.dump(features, f, indent=2)
